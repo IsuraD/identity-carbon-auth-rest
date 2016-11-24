@@ -21,8 +21,11 @@ package org.wso2.carbon.identity.context.rewrite.valve;
 import org.apache.catalina.connector.Request;
 import org.apache.catalina.connector.Response;
 import org.apache.catalina.valves.ValveBase;
+import org.apache.commons.lang.StringUtils;
+import org.wso2.carbon.base.MultitenantConstants;
 import org.wso2.carbon.identity.context.rewrite.util.Utils;
 import org.wso2.carbon.identity.core.util.IdentityConfigParser;
+import org.wso2.carbon.identity.core.util.IdentityUtil;
 
 import javax.servlet.ServletException;
 import java.io.IOException;
@@ -32,17 +35,19 @@ import java.util.Map;
 
 public class TenantContextRewriteValve extends ValveBase {
 
+    private static final String TENANT_NAME_FROM_CONTEXT = "TenantNameFromContext";
+
     @Override
     public void invoke(Request request, Response response) throws IOException, ServletException {
         String requestURI = request.getRequestURI();
 
-        List<String> restrictedContexts = getRestrictedContexts();
+        List<String> contextsToRewrite = getContextsToRewrite();
         String contextToForward = null;
 
         boolean isContextRewrite = false;
 
         //Get the rewrite contexts and check whether request URI contains any of rewrite contains.
-        for (String context : restrictedContexts) {
+        for (String context : contextsToRewrite) {
             if (requestURI.contains(context)) {
                 isContextRewrite = true;
                 contextToForward = context;
@@ -56,22 +61,33 @@ public class TenantContextRewriteValve extends ValveBase {
             return;
         }
 
-        String tenantDomain = Utils.getTenantDomainFromURLMapping(request);
+        try {
+            String tenantDomain = Utils.getTenantDomainFromURLMapping(request);
+            if (StringUtils.isBlank(tenantDomain)) {
+                tenantDomain = MultitenantConstants.SUPER_TENANT_DOMAIN_NAME;
+            }
 
-        String dispatchLocation;
-        if (requestURI.contains("/t/")) {
-            dispatchLocation = requestURI.replace("/t/" + tenantDomain + contextToForward, "");
-        } else {
-            dispatchLocation = requestURI.replace(contextToForward, "");
+            IdentityUtil.threadLocalProperties.get().put(TENANT_NAME_FROM_CONTEXT, tenantDomain);
+
+            String dispatchLocation;
+            if (requestURI.contains("/t/")) {
+                dispatchLocation = requestURI.replace("/t/" + tenantDomain + contextToForward, "");
+            } else {
+                dispatchLocation = requestURI.replace(contextToForward, "");
+            }
+
+
+            //Dispatch request to new endpoint
+            request.getContext().setCrossContext(true);
+            request.getServletContext().getContext(contextToForward).getRequestDispatcher("/" + dispatchLocation).forward
+                    (request, response);
+        } finally {
+            IdentityUtil.threadLocalProperties.get().remove(TENANT_NAME_FROM_CONTEXT);
         }
-
-        //Dispatch request to new endpoint
-        request.getServletContext().getContext(contextToForward).getRequestDispatcher("/" + dispatchLocation).forward
-                (request, response);
     }
 
 
-    private List<String> getRestrictedContexts() {
+    private List<String> getContextsToRewrite() {
         Map<String, Object> configuration = IdentityConfigParser.getInstance().getConfiguration();
         Object value = configuration.get("TenantContextsToRewrite.context");
         if (value == null) {
